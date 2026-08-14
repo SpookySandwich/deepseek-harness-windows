@@ -1,0 +1,21 @@
+# Upstream reference checkout (CI fetches it fresh; never committed)
+/deepseek-harness/
+
+# Dev sidecar runtime and staging
+/sidecar/
+/.staging/
+
+# Node
+node_modules/
+
+# Rust / Tauri build output and generated runtime
+shell/src-tauri/target/
+shell/src-tauri/gen/
+shell/src-tauri/resources/
+
+# Misc
+.DS_Store
+*.log
+
+# Installer extraction scratch (local inspection debris)
+/.tmp_extract/

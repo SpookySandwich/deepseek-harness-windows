@@ -1,0 +1,65 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* Boot loading page — matches dsh's own AppRoot loading screen
+   (packages/client/web/src/AppRoot.module.css) in layout, type, and colors,
+   with its dsw tokens resolved to their literal values (tokens don't exist
+   on this page). The background stays transparent so the window's Mica
+   backdrop shows through during boot. Theme follows prefers-color-scheme,
+   which matches dsh's default (system) theme. */
+.boot {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: transparent;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.wordmark {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: rgb(15, 17, 21);
+}
+
+.hint {
+  font-size: 12px;
+  line-height: 18px;
+  color: rgb(129, 133, 140);
+}
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.1);
+  border-top-color: rgb(15, 17, 21);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-color-scheme: dark) {
+  .wordmark { color: rgb(249, 250, 251); }
+  .hint { color: rgb(173, 178, 184); }
+  .spinner {
+    border-color: rgba(255, 255, 255, 0.12);
+    border-top-color: rgb(249, 250, 251);
+  }
+}

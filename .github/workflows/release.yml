@@ -1,0 +1,115 @@
+name: Release (Windows installer)
+
+# Builds the Windows desktop app: prepares the dsh sidecar runtime from the
+# published npm package, then builds the Tauri shell into an NSIS installer
+# and attaches it to a GitHub release. (MSI is intentionally not a target:
+# MSI versions only accept numeric pre-release identifiers, which dsh's
+# semver pre-release tags like 0.1.0-rc.6 violate.)
+#
+# Triggers:
+#   - push of a v* tag: manual release (bundles dsh@latest)
+#   - workflow_dispatch: test build, optional dsh version, no release
+#   - nightly schedule: upstream tracking — compares npm's latest
+#     @deepseek-ai/dsh version against the latest GitHub release tag and
+#     only builds + releases v<dsh-version> when upstream published a new
+#     version (upstream ships to npm, not GitHub releases).
+on:
+  workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: '@deepseek-ai/dsh version to bundle (default: latest)'
+        required: false
+        default: 'latest'
+  push:
+    tags: ['v*']
+  schedule:
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.c.outputs.skip }}
+      dsh_version: ${{ steps.c.outputs.dsh_version }}
+    steps:
+      - name: Compare npm latest against latest release tag
+        id: c
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          INPUT_DSH_VERSION: ${{ inputs.dsh_version || '' }}
+        run: |
+          if [ "$EVENT" != "schedule" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "dsh_version=${INPUT_DSH_VERSION:-latest}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest=$(npm view @deepseek-ai/dsh version)
+          if gh release list --json tagName --jq '.[].tagName' | grep -qx "v$latest"; then
+            echo "npm latest $latest already has a release; skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm latest $latest has no release yet; building"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "dsh_version=$latest" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: windows-latest
+    env:
+      DSH_VERSION: ${{ needs.check.outputs.dsh_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare dsh sidecar runtime
+        shell: pwsh
+        run: ./scripts/prepare-runtime.ps1 -Version $env:DSH_VERSION
+
+      # The installer version tracks the bundled dsh version, not the shell's
+      # own tauri.conf.json version (which stays 0.1.0 for local dev builds).
+      - name: Stamp app version from bundled dsh
+        shell: pwsh
+        run: |
+          $v = (Get-Content shell/src-tauri/resources/runtime/dsh-version.txt).Trim()
+          node -e "const fs=require('fs');const p='shell/src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.version='$v';fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')"
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install shell dependencies
+        working-directory: shell
+        run: npm ci --no-audit --no-fund
+
+      - name: Build installers
+        working-directory: shell
+        run: npm run tauri build
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsis-installer
+          path: shell/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Scheduled runs cut a new tag named after the dsh version; manual
+          # tag pushes release under the pushed tag.
+          tag_name: ${{ github.event_name == 'schedule' && format('v{0}', env.APP_VERSION) || github.ref_name }}
+          name: DeepSeek Harness v${{ env.APP_VERSION }}
+          prerelease: ${{ contains(env.APP_VERSION, '-') }}
+          files: |
+            shell/src-tauri/target/release/bundle/nsis/*.exe
