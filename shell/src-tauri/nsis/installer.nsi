@@ -30,7 +30,6 @@ ManifestDPIAwareness PerMonitorV2
 !include "StrFunc.nsh"
 ${StrCase}
 ${StrLoc}
-${UnStrRep}
 
 {{#if installer_hooks}}
 !include "{{installer_hooks}}"
@@ -749,6 +748,52 @@ SectionEnd
 ; Writes a dsh.cmd shim into $INSTDIR\bin pointing at the bundled node + dsh
 ; entry, appends that dir to the user's or system's PATH following the
 ; install mode, and records a marker so uninstall can undo exactly this.
+;
+; The PATH edit is delegated to a PowerShell helper (written to $PLUGINSDIR at
+; run time) that uses the .NET registry API. Never read-modify-write PATH with
+; ReadRegStr/WriteRegExpandStr here: ReadRegStr silently returns "" for values
+; longer than NSIS_MAX_STRLEN (1024 in stock NSIS builds), so the write-back
+; would replace the user's entire PATH with just the appended directory.
+; PowerShell has no such limit, and the helper is also idempotent (no
+; duplicate entries) and preserves REG_EXPAND_SZ without expanding %vars%.
+
+; MultiUser.nsh is only included for installMode=both; branch at compile
+; time instead (perMachine/both -> system PATH, currentUser -> user PATH).
+!if "${INSTALLMODE}" == "currentUser"
+  !define DSHPATHSCOPE "User"
+!else
+  !define DSHPATHSCOPE "Machine"
+!endif
+
+; Writes the PATH-editing helper to $PLUGINSDIR\dsh-path.ps1. Clobbers $0.
+!macro WriteDshPathPs1
+  FileOpen $0 "$PLUGINSDIR\dsh-path.ps1" w
+  FileWrite $0 "param([string]$$Dir,[string]$$Scope,[string]$$Action)$\r$\n"
+  FileWrite $0 "$$ErrorActionPreference = 'Stop'$\r$\n"
+  FileWrite $0 "if ($$Scope -eq 'Machine') {$\r$\n"
+  FileWrite $0 "  $$root = [Microsoft.Win32.Registry]::LocalMachine$\r$\n"
+  FileWrite $0 "  $$subKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'$\r$\n"
+  FileWrite $0 "} else {$\r$\n"
+  FileWrite $0 "  $$root = [Microsoft.Win32.Registry]::CurrentUser$\r$\n"
+  FileWrite $0 "  $$subKey = 'Environment'$\r$\n"
+  FileWrite $0 "}$\r$\n"
+  FileWrite $0 "$$key = $$root.OpenSubKey($$subKey, $$true)$\r$\n"
+  FileWrite $0 "if ($$null -eq $$key) { exit 1 }$\r$\n"
+  FileWrite $0 "$$path = [string]$$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)$\r$\n"
+  FileWrite $0 "$$parts = @($$path -split ';' | Where-Object { $$_ -ne '' })$\r$\n"
+  FileWrite $0 "if ($$Action -eq 'Add') {$\r$\n"
+  FileWrite $0 "  if ($$parts -contains $$Dir) { exit 0 }$\r$\n"
+  FileWrite $0 "  if ($$path -eq '') { $$path = $$Dir } else { $$path = $$path.TrimEnd(';') + ';' + $$Dir }$\r$\n"
+  FileWrite $0 "} else {$\r$\n"
+  FileWrite $0 "  if ($$parts -notcontains $$Dir) { exit 0 }$\r$\n"
+  FileWrite $0 "  $$path = ($$parts | Where-Object { $$_ -ne $$Dir }) -join ';'$\r$\n"
+  FileWrite $0 "}$\r$\n"
+  FileWrite $0 "$$key.SetValue('Path', $$path, [Microsoft.Win32.RegistryValueKind]::ExpandString)$\r$\n"
+  FileWrite $0 "$$key.Close()$\r$\n"
+  FileWrite $0 "exit 0$\r$\n"
+  FileClose $0
+!macroend
+
 Section "Add dsh command-line tool to PATH" SecDshPath
   CreateDirectory "$INSTDIR\bin"
   FileOpen $0 "$INSTDIR\bin\dsh.cmd" w
@@ -758,19 +803,18 @@ Section "Add dsh command-line tool to PATH" SecDshPath
 
   ReadRegStr $1 SHCTX "${UNINSTKEY}" "DshPathAdded"
   ${If} $1 == ""
-    ; MultiUser.nsh is only included for installMode=both; branch at compile
-    ; time instead (perMachine -> system PATH, currentUser -> user PATH).
-    !if "${INSTALLMODE}" == "currentUser"
-      ReadRegStr $2 HKCU "Environment" "Path"
-      StrCpy $2 "$2;$INSTDIR\bin"
-      WriteRegExpandStr HKCU "Environment" "Path" $2
-    !else
-      ReadRegStr $2 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
-      StrCpy $2 "$2;$INSTDIR\bin"
-      WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" $2
-    !endif
-    WriteRegStr SHCTX "${UNINSTKEY}" "DshPathAdded" "$INSTDIR\bin"
-    SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+    InitPluginsDir
+    !insertmacro WriteDshPathPs1
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\dsh-path.ps1" -Dir "$INSTDIR\bin" -Scope ${DSHPATHSCOPE} -Action Add'
+    Pop $2 ; exit code, or "error"/"timeout" if the process did not run
+    Pop $3 ; captured output (unused)
+    ${If} $2 == "0"
+      WriteRegStr SHCTX "${UNINSTKEY}" "DshPathAdded" "$INSTDIR\bin"
+      SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+    ${Else}
+      ; PATH is left untouched; the shim still works via its full path.
+      DetailPrint "Could not add $INSTDIR\bin to PATH (dsh.cmd was still installed there)."
+    ${EndIf}
   ${EndIf}
 SectionEnd
 
@@ -897,23 +941,20 @@ Section Uninstall
     ${EndIf}
   ${EndIf}
 
-  ; Remove the dsh CLI shim and its PATH entry (only when we added it)
+  ; Remove the dsh CLI shim and its PATH entry (only when we added it).
+  ; Same PowerShell helper as the install side: NSIS must never
+  ; read-modify-write PATH itself (see the SecDshPath comment: ReadRegStr
+  ; truncates values over NSIS_MAX_STRLEN to "" and the write-back wipes PATH).
   ReadRegStr $R6 SHCTX "${UNINSTKEY}" "DshPathAdded"
   ${If} $R6 != ""
-    !if "${INSTALLMODE}" == "currentUser"
-      ReadRegStr $R5 HKCU "Environment" "Path"
-      ${UnStrRep} $R5 $R5 ";$R6" ""
-      ${UnStrRep} $R5 $R5 "$R6;" ""
-      ${UnStrRep} $R5 $R5 "$R6" ""
-      WriteRegExpandStr HKCU "Environment" "Path" $R5
-    !else
-      ReadRegStr $R5 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
-      ${UnStrRep} $R5 $R5 ";$R6" ""
-      ${UnStrRep} $R5 $R5 "$R6;" ""
-      ${UnStrRep} $R5 $R5 "$R6" ""
-      WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" $R5
-    !endif
-    SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+    InitPluginsDir
+    !insertmacro WriteDshPathPs1
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\dsh-path.ps1" -Dir "$R6" -Scope ${DSHPATHSCOPE} -Action Remove'
+    Pop $R5 ; exit code, or "error"/"timeout" if the process did not run
+    Pop $R4 ; captured output (unused)
+    ${If} $R5 == "0"
+      SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+    ${EndIf}
     DeleteRegValue SHCTX "${UNINSTKEY}" "DshPathAdded"
   ${EndIf}
   Delete "$INSTDIR\bin\dsh.cmd"
