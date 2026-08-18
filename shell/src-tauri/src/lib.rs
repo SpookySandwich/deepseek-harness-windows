@@ -115,9 +115,14 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
+/// The bundled plugin's package name. Must match the payload directory
+/// prepare-runtime.ps1 writes under `plugins/`, which it takes from the
+/// package's own manifest.
+const PLUGIN_PACKAGE: &str = "dsh-plugin-smooth-stream";
+
 /// The bundled plugin's registry spec, recorded in the profile's dependencies
 /// so `dsh plugin update` can refresh it later.
-const PLUGIN_SPEC: &str = "github:SpookySandwich/dsh-smooth-stream";
+const PLUGIN_SPEC: &str = "github:SpookySandwich/dsh-plugin-smooth-stream";
 
 fn copy_dir(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {dst:?}: {e}"))?;
@@ -143,7 +148,7 @@ fn copy_dir(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
 /// is not undone on every start.
 fn install_bundled_plugin(app: &tauri::AppHandle, rt: &Runtime) -> Result<(), String> {
     let marker = rt.dir.join("plugins").join("install-smooth-stream");
-    let payload = rt.dir.join("plugins").join("dsh-smooth-stream");
+    let payload = rt.dir.join("plugins").join(PLUGIN_PACKAGE);
     if !marker.exists() || !payload.exists() {
         return Ok(());
     }
@@ -155,7 +160,7 @@ fn install_bundled_plugin(app: &tauri::AppHandle, rt: &Runtime) -> Result<(), St
     let profile = home.join("profiles").join("web");
 
     // Package files land verbatim under the profile's node_modules.
-    let dest = profile.join("node_modules").join("dsh-smooth-stream");
+    let dest = profile.join("node_modules").join(PLUGIN_PACKAGE);
     if dest.exists() {
         std::fs::remove_dir_all(&dest).map_err(|e| format!("clear {dest:?}: {e}"))?;
     }
@@ -180,8 +185,8 @@ fn install_bundled_plugin(app: &tauri::AppHandle, rt: &Runtime) -> Result<(), St
     let bundles = manifest["dsh"]["profile"]["bundles"]
         .as_array_mut()
         .ok_or("profile bundles is not a list")?;
-    if !bundles.iter().any(|b| b == "dsh-smooth-stream") {
-        bundles.push(serde_json::json!("dsh-smooth-stream"));
+    if !bundles.iter().any(|b| b == PLUGIN_PACKAGE) {
+        bundles.push(serde_json::json!(PLUGIN_PACKAGE));
     }
     if manifest["dependencies"].as_object().is_none() {
         manifest["dependencies"] = serde_json::json!({});
@@ -189,7 +194,7 @@ fn install_bundled_plugin(app: &tauri::AppHandle, rt: &Runtime) -> Result<(), St
     manifest["dependencies"]
         .as_object_mut()
         .ok_or("profile dependencies is not an object")?
-        .entry("dsh-smooth-stream")
+        .entry(PLUGIN_PACKAGE)
         .or_insert_with(|| serde_json::json!(PLUGIN_SPEC));
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     std::fs::write(&manifest_path, text + "\n").map_err(|e| format!("write {manifest_path:?}: {e}"))?;

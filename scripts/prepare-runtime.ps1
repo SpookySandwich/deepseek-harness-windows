@@ -1,6 +1,6 @@
 param(
     [string]$Version = "latest",
-    [string]$PluginRepo = "SpookySandwich/dsh-smooth-stream",
+    [string]$PluginRepo = "SpookySandwich/dsh-plugin-smooth-stream",
     [string]$PluginRef = "main",
     [string]$OutDir = (Join-Path $PSScriptRoot "..\shell\src-tauri\resources\runtime")
 )
@@ -54,8 +54,15 @@ New-Item -ItemType Directory -Force $pluginStage | Out-Null
 $zip = Join-Path $pluginStage "plugin.zip"
 Invoke-WebRequest -Uri "https://codeload.github.com/$PluginRepo/zip/refs/heads/$PluginRef" -OutFile $zip
 Expand-Archive -Path $zip -DestinationPath $pluginStage
-$pluginSrc = Join-Path $pluginStage "dsh-smooth-stream-$PluginRef"
-$pluginOut = Join-Path $outDir "plugins\dsh-smooth-stream"
+# Take the archive's own root directory rather than assuming "<repo>-<ref>":
+# GitHub redirects a renamed repository's codeload URL but names the root after
+# the *current* repository, so a hardcoded name silently breaks on a rename.
+$pluginSrc = (Get-ChildItem -Path $pluginStage -Directory | Select-Object -First 1).FullName
+if (-not $pluginSrc) { throw "plugin archive from $PluginRepo@$PluginRef contained no directory" }
+# The payload directory name must match the package name the shell installs
+# into the profile (see PLUGIN_PACKAGE in shell/src-tauri/src/lib.rs).
+$pluginName = (Get-Content (Join-Path $pluginSrc "package.json") -Raw | ConvertFrom-Json).name
+$pluginOut = Join-Path $outDir "plugins\$pluginName"
 if (Test-Path $pluginOut) { Remove-Item $pluginOut -Recurse -Force }
 New-Item -ItemType Directory -Force $pluginOut | Out-Null
 foreach ($item in @("package.json", "cordis.patch.yml", "plugin.client.js", "lib", "LICENSE")) {
@@ -66,4 +73,4 @@ Write-Host "==> Runtime prepared:"
 Write-Host "    node.exe    -> $(Join-Path $outDir 'node.exe')"
 Write-Host "    bin.js      -> $(Join-Path $outDir 'node_modules\@deepseek-ai\dsh\lib\bin.js')"
 Write-Host "    dsh version -> $dshVersion"
-Write-Host "    plugin      -> $pluginOut"
+Write-Host "    plugin      -> $pluginOut ($pluginName)"
