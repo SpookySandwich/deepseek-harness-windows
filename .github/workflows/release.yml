@@ -8,7 +8,8 @@ name: Release (Windows installer)
 #
 # Triggers:
 #   - push of a v* tag: manual release (bundles dsh@latest)
-#   - workflow_dispatch: test build, optional dsh version, no release
+#   - workflow_dispatch: test build, optional dsh version; set release=true
+#     to publish v<dsh-version> with the installer attached
 #   - nightly schedule: upstream tracking — compares npm's latest
 #     @deepseek-ai/dsh version against the latest GitHub release tag and
 #     only builds + releases v<dsh-version> when upstream published a new
@@ -20,6 +21,11 @@ on:
         description: '@deepseek-ai/dsh version to bundle (default: latest)'
         required: false
         default: 'latest'
+      release:
+        description: 'Publish a v<dsh-version> release with the installer'
+        type: boolean
+        required: false
+        default: false
   push:
     tags: ['v*']
   schedule:
@@ -39,17 +45,30 @@ jobs:
         id: c
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh resolves the repo from a checkout or GH_REPO. This job does not
+          # check out, so without GH_REPO `gh release list` errored, the pipe
+          # fed grep nothing, and every nightly concluded "no release yet" and
+          # rebuilt — then re-uploaded the same installer onto the old tag.
+          GH_REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           INPUT_DSH_VERSION: ${{ inputs.dsh_version || '' }}
         run: |
+          set -euo pipefail
           if [ "$EVENT" != "schedule" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "dsh_version=${INPUT_DSH_VERSION:-latest}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           latest=$(npm view @deepseek-ai/dsh version)
-          if gh release list --json tagName --jq '.[].tagName' | grep -qx "v$latest"; then
-            echo "npm latest $latest already has a release; skipping"
+          if [ -z "$latest" ]; then
+            echo "npm view returned no version for @deepseek-ai/dsh" >&2
+            exit 1
+          fi
+          # Fail loudly if the release list cannot be read, rather than
+          # silently treating "cannot tell" as "needs building".
+          tags=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          if printf '%s\n' "$tags" | grep -qx "v$latest"; then
+            echo "npm latest $latest already released; skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "npm latest $latest has no release yet; building"
@@ -107,11 +126,11 @@ jobs:
       # v<dsh-version> name, so pushing a tag for a version the nightly already
       # released targets an existing release — upload to it instead of failing.
       - name: Attach to GitHub release
-        if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v') || inputs.release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event_name == 'schedule' && format('v{0}', env.APP_VERSION) || github.ref_name }}
+          TAG: ${{ (github.event_name == 'schedule' || inputs.release) && format('v{0}', env.APP_VERSION) || github.ref_name }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -126,6 +145,14 @@ jobs:
           else
             prerelease=()
             case "$APP_VERSION" in *-*) prerelease=(--prerelease) ;; esac
+            # --generate-notes is required, not cosmetic: with no notes flag
+            # `gh release create` tries to prompt for a body and aborts on a
+            # runner, which has no TTY.
+            # --target pins the new tag to the commit that was actually built;
+            # without it gh tags the default branch's current head instead.
             gh release create "$TAG" "${files[@]}" \
-              --title "DeepSeek Harness $TAG" "${prerelease[@]}"
+              --title "DeepSeek Harness $TAG" \
+              --generate-notes \
+              --target "$GITHUB_SHA" \
+              "${prerelease[@]}"
           fi
