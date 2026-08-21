@@ -1,5 +1,6 @@
 param(
     [string]$Version = "latest",
+    [string]$PnpmVersion = "10",
     [string]$PluginRepo = "SpookySandwich/dsh-plugin-smooth-stream",
     [string]$PluginRef = "main",
     [string]$OutDir = (Join-Path $PSScriptRoot "..\shell\src-tauri\resources\runtime")
@@ -27,7 +28,10 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Set-Content -Path (Join-Path $stage "package.json") -Value '{"name":"dsh-runtime","private":true}' -Encoding utf8
 Push-Location $stage
-npm install $spec --omit=dev --no-audit --no-fund
+# pnpm ships alongside dsh: `dsh plugin` is a thin forwarder that spawns
+# `pnpm` and aborts with "pnpm not found on PATH" without it, so a package
+# that omits pnpm can run dsh but can never install a plugin.
+npm install $spec pnpm@$PnpmVersion --omit=dev --no-audit --no-fund
 Pop-Location
 
 Write-Host "==> Copying node.exe and node_modules to $outDir"
@@ -39,6 +43,19 @@ Copy-Item (Join-Path $stage "node_modules") (Join-Path $outDir "node_modules") -
 
 # Copy the notification bridge (subscribes to dsh turn/end events)
 Copy-Item (Join-Path $PSScriptRoot "bridge.mjs") (Join-Path $outDir "bridge.mjs") -Force
+
+# pnpm.cmd shim: `dsh plugin` spawns bare `pnpm`, so the dsh launcher
+# prepends this directory to PATH for the child process (see installer.nsi).
+$pnpmCjs = Join-Path $outDir "node_modules\pnpm\bin\pnpm.cjs"
+if (-not (Test-Path $pnpmCjs)) { throw "pnpm was not installed into the runtime ($pnpmCjs missing)" }
+$pnpmCmd = @(
+    '@echo off',
+    'setlocal',
+    'set "DSH_RUNTIME=%~dp0"',
+    '"%DSH_RUNTIME%node.exe" "%DSH_RUNTIME%node_modules\pnpm\bin\pnpm.cjs" %*'
+) -join "`r`n"
+Set-Content -Path (Join-Path $outDir "pnpm.cmd") -Value $pnpmCmd -Encoding ascii
+$pnpmVersionResolved = (Get-Content (Join-Path $outDir "node_modules\pnpm\package.json") -Raw | ConvertFrom-Json).version
 
 # Record the resolved dsh version (CI stamps it into the installer version)
 $dshVersion = (Get-Content (Join-Path $outDir "node_modules\@deepseek-ai\dsh\package.json") -Raw | ConvertFrom-Json).version
@@ -73,4 +90,5 @@ Write-Host "==> Runtime prepared:"
 Write-Host "    node.exe    -> $(Join-Path $outDir 'node.exe')"
 Write-Host "    bin.js      -> $(Join-Path $outDir 'node_modules\@deepseek-ai\dsh\lib\bin.js')"
 Write-Host "    dsh version -> $dshVersion"
+Write-Host "    pnpm        -> $(Join-Path $outDir 'pnpm.cmd') (v$pnpmVersionResolved)"
 Write-Host "    plugin      -> $pluginOut ($pluginName)"

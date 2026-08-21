@@ -796,9 +796,16 @@ SectionEnd
 
 Section "Add dsh command-line tool to PATH" SecDshPath
   CreateDirectory "$INSTDIR\bin"
+  ; `dsh plugin ...` is a forwarder that spawns bare `pnpm`, so the launcher
+  ; puts the bundled runtime (which carries pnpm.cmd) first on PATH for the
+  ; child only. Without this, plugin management fails on a machine that has
+  ; no global pnpm, with "pnpm not found on PATH".
   FileOpen $0 "$INSTDIR\bin\dsh.cmd" w
   FileWrite $0 '@echo off$\r$\n'
-  FileWrite $0 '"%~dp0..\resources\runtime\node.exe" "%~dp0..\resources\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js" %*$\r$\n'
+  FileWrite $0 'setlocal$\r$\n'
+  FileWrite $0 'set "DSH_RUNTIME=%~dp0..\resources\runtime"$\r$\n'
+  FileWrite $0 'set "PATH=%DSH_RUNTIME%;%PATH%"$\r$\n'
+  FileWrite $0 '"%DSH_RUNTIME%\node.exe" "%DSH_RUNTIME%\node_modules\@deepseek-ai\dsh\lib\bin.js" %*$\r$\n'
   FileClose $0
 
   ReadRegStr $1 SHCTX "${UNINSTKEY}" "DshPathAdded"
