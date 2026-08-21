@@ -96,7 +96,42 @@ struct Runtime {
     dir: PathBuf,
 }
 
+/// First port tried for the sidecar. The web app is served from
+/// `http://127.0.0.1:<port>`, and that string is the WebView's *origin* — which
+/// is what partitions `localStorage`, `sessionStorage`, IndexedDB and cookies.
+///
+/// This used to bind `127.0.0.1:0` and take whatever ephemeral port Windows
+/// handed out, so every launch produced a new origin and every plugin's stored
+/// settings silently reset to defaults. (A user profile here had accumulated 25
+/// orphaned localStorage partitions, one per launch.) Keeping the port stable
+/// keeps the origin stable, so settings persist across restarts.
+///
+/// The range is in the IANA dynamic/private block and above the ephemeral range
+/// Windows hands out by default (which starts at 49152), so a stable pick is
+/// unlikely to be stolen by an unrelated process between runs.
+const PREFERRED_PORT: u16 = 47794;
+const PORT_SCAN: u16 = 32;
+
+/// Bind a stable port when possible, so the WebView origin does not change
+/// between launches. Scans a short deterministic range and only falls back to an
+/// ephemeral port if every candidate is taken — in that case stored settings are
+/// lost for that run, which is strictly better than failing to start.
 fn find_free_port() -> u16 {
+    for offset in 0..PORT_SCAN {
+        let candidate = PREFERRED_PORT.saturating_add(offset);
+        // Binding and immediately dropping leaves a window where another
+        // process could take the port before the sidecar binds it. The sidecar
+        // failing to bind is loud and recoverable, so prefer that over the
+        // silent per-launch origin churn this replaces.
+        if TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+            return candidate;
+        }
+    }
+    eprintln!(
+        "[shell] ports {}-{} all busy; falling back to an ephemeral port (plugin settings will not persist this run)",
+        PREFERRED_PORT,
+        PREFERRED_PORT.saturating_add(PORT_SCAN - 1)
+    );
     TcpListener::bind("127.0.0.1:0")
         .expect("failed to bind for port discovery")
         .local_addr()
