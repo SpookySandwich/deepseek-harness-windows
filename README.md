@@ -56,6 +56,12 @@ What ships instead:
 
 Per-user installs edit the user PATH (`HKCU\Environment`); machine-wide installs edit the system PATH.
 
+This behaviour is covered by a regression test. It extracts the helper from `installer.nsi` — so it tests the code that actually ships, not a copy — points it at a throwaway registry key, and checks a 2000+ character PATH survives install and uninstall intact:
+
+```powershell
+pwsh -File scripts/test-dsh-path.ps1
+```
+
 If you skip the component, the launcher is not created; you can still run the app normally, or add the `bin` directory to PATH yourself.
 
 ## Architecture

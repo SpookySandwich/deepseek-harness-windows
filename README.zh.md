@@ -56,6 +56,12 @@ NSIS 的字符串长度上限是 `NSIS_MAX_STRLEN`（1024 个字符）。超过�
 
 按用户安装修改用户 PATH（`HKCU\Environment`），全机安装修改系统 PATH。
 
+这一行为有回归测试覆盖。测试会**直接从 `installer.nsi` 中提取**辅助脚本（因此测的是真正随包发布的代码，而不是一份副本），把它指向一个临时注册表键，并验证一条 2000 字符以上的 PATH 在安装与卸载后都完好无损：
+
+```powershell
+pwsh -File scripts/test-dsh-path.ps1
+```
+
 若不勾选该组件，则不会创建启动器；应用本身照常使用，你也可以自行把 `bin` 目录加入 PATH。
 
 ## 架构
